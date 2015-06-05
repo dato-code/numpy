@@ -11,6 +11,14 @@
 
 #include <assert.h>
 
+#if defined(__linux__) || defined(__APPLE__)
+#include <dlfcn.h>
+#define ENABLE_ALT_MALLOC
+#elif defined(_WIN32)
+#include <windows.h>
+#define ENABLE_ALT_MALLOC
+#endif
+
 #define NBUCKETS 1024 /* number of buckets for data*/
 #define NBUCKETS_DIM 16 /* number of buckets for dimensions/strides */
 #define NCACHE 7 /* number of cache entries per bucket */
@@ -21,7 +29,69 @@ typedef struct {
 } cache_bucket;
 static cache_bucket datacache[NBUCKETS];
 static cache_bucket dimcache[NBUCKETS_DIM];
+static int alt_malloc_checked = 0;
+static void* (*alt_malloc)(size_t size) = NULL;
+static void* (*alt_free)(void *ptr) = NULL;
+static void* (*alt_calloc)(size_t nmemb, size_t size) = NULL;
+static void* (*alt_realloc)(void *ptr, size_t size) = NULL;
 
+#ifdef ENABLE_ALT_MALLOC
+
+#if defined(__linux__) || defined(__APPLE__)
+static void* get_symbol(void* handle, const char* symbol) {
+  return dlsym(handle, symbol);
+}
+#elif defined(_WIN32)
+static void* get_symbol(HINSTANCE handle, const char* symbol) {
+  return (void *)GetProcAddress(handle, symbol);
+}
+#endif
+
+/*
+ * sets buf to the concatenation of a and b and returns the buf.
+ * Either a or b can be NULL.
+ */
+static char* str_concat2(char* buf, const char* a, const char* b) {
+  buf[0] = 0;
+  if (a != NULL) strcat(buf, a);
+  if (b != NULL) strcat(buf, b);
+  return buf;
+}
+
+static void perform_alt_malloc_check() {
+  if (alt_malloc_checked) return;
+  alt_malloc_checked = 1;
+  char* altmalloc_library = getenv("NUMPY_ALTERNATE_MALLOC");
+  char* altmalloc_prefix = getenv("NUMPY_ALTERNATE_MALLOC_PREFIX");
+  if (altmalloc_library == NULL) return;
+#if defined(__linux__) || defined(__APPLE__)
+  void* handle = dlopen(altmalloc_library, RTLD_NOW | RTLD_LOCAL);
+#elif defined(_WIN32)
+  HINSTANCE handle = LoadLibrary(altmalloc_library);
+#endif
+  if(handle != NULL) {
+    int prefixlen = altmalloc_prefix != NULL ? strlen(altmalloc_prefix)  : 0;
+    /* have enough to memory to keep malloc_prefix + "realloc\0" */
+    int maxlen = prefixlen + 8;
+    char* temp = (char*)malloc(maxlen); 
+    alt_malloc = get_symbol(handle, str_concat2(temp, altmalloc_prefix, "malloc"));
+    alt_free = get_symbol(handle, str_concat2(temp, altmalloc_prefix, "free"));
+    alt_calloc = get_symbol(handle, str_concat2(temp, altmalloc_prefix, "calloc"));
+    alt_realloc = get_symbol(handle, str_concat2(temp, altmalloc_prefix, "realloc"));
+    free(temp);
+    if (alt_malloc != NULL && alt_free != NULL && 
+        alt_calloc != NULL && alt_realloc != NULL) {
+    } else {
+      alt_malloc = NULL;
+      alt_free = NULL;
+      alt_calloc = NULL;
+      alt_realloc = NULL;
+    }
+  }
+}
+#else
+static void perform_alt_malloc_check() { }
+#endif
 /*
  * very simplistic small memory block cache to avoid more expensive libc
  * allocations
@@ -169,8 +239,9 @@ NPY_NO_EXPORT void *
 PyDataMem_NEW(size_t size)
 {
     void *result;
-
-    result = malloc(size);
+    perform_alt_malloc_check();
+    if (alt_malloc) result = alt_malloc(size);
+    else result = malloc(size);
     if (_PyDataMem_eventhook != NULL) {
         NPY_ALLOW_C_API_DEF
         NPY_ALLOW_C_API
@@ -191,7 +262,10 @@ PyDataMem_NEW_ZEROED(size_t size, size_t elsize)
 {
     void *result;
 
-    result = calloc(size, elsize);
+    perform_alt_malloc_check();
+    if (alt_calloc) result = alt_calloc(size, elsize);
+    else result = calloc(size, elsize);
+
     if (_PyDataMem_eventhook != NULL) {
         NPY_ALLOW_C_API_DEF
         NPY_ALLOW_C_API
@@ -210,7 +284,10 @@ PyDataMem_NEW_ZEROED(size_t size, size_t elsize)
 NPY_NO_EXPORT void
 PyDataMem_FREE(void *ptr)
 {
-    free(ptr);
+    perform_alt_malloc_check();
+    if (alt_free) alt_free(ptr);
+    else free(ptr);
+
     if (_PyDataMem_eventhook != NULL) {
         NPY_ALLOW_C_API_DEF
         NPY_ALLOW_C_API
@@ -230,7 +307,10 @@ PyDataMem_RENEW(void *ptr, size_t size)
 {
     void *result;
 
-    result = realloc(ptr, size);
+    perform_alt_malloc_check();
+    if (alt_realloc) alt_realloc(ptr, size);
+    else realloc(ptr, size);
+
     if (_PyDataMem_eventhook != NULL) {
         NPY_ALLOW_C_API_DEF
         NPY_ALLOW_C_API
