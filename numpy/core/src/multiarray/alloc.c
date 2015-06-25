@@ -25,6 +25,12 @@
 static void * datacache[NBUCKETS][NCACHE];
 static void * dimcache[NBUCKETS_DIM][NCACHE];
 
+static int alt_malloc_checked = 0;
+static void* (*alt_malloc)(size_t size) = NULL;
+static void* (*alt_free)(void *ptr) = NULL;
+static void* (*alt_calloc)(size_t nmemb, size_t size) = NULL;
+static void* (*alt_realloc)(void *ptr, size_t size) = NULL;
+
 #ifdef ENABLE_ALT_MALLOC
 
 #if defined(__linux__) || defined(__APPLE__)
