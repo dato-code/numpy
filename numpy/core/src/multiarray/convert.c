@@ -119,9 +119,27 @@ PyArray_ToFile(PyArrayObject *self, FILE *fp, char *sep, char *format)
                 size = PyArray_SIZE(self);
             }
 #else
-            n = fwrite((const void *)PyArray_DATA(self),
-                    (size_t) PyArray_DESCR(self)->elsize,
-                    (size_t) size, fp);
+            { 
+                const char* data = (const char*)PyArray_DATA(self);
+                size_t elsize = PyArray_DESCR(self)->elsize;
+                size_t step = 2*1024*1024 / elsize;
+                for (n = 0; n < size; n += step) {
+                    size_t nelem = step;
+                    if (size < n + nelem) nelem = size - n;
+                    // touch the memory at page size steps to force page 
+                    volatile char c;
+                    size_t j = 0;
+                    for (j = 0; j < nelem; j += 512) {
+                      c = *(data + elsize * (n + j));
+                    }
+                    size_t writes = fwrite(data + (elsize * n),
+                                           elsize,
+                                           nelem, fp);
+                    if (writes < nelem) {
+                      break;
+                    }
+                }
+            }
 #endif
             NPY_END_ALLOW_THREADS;
             if (n < size) {
